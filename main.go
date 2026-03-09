@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"os"
 	"os/user"
@@ -11,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fatih/color"
 )
 
 type Task struct {
@@ -70,15 +71,23 @@ Usage:
   todo add "текст задачи"    – добавить задачу
   todo list                  – показать все задачи
   todo done N                – отметить задачу N выполненной
+  todo edit N "текст"        – изменить текст задачи N
   todo del N                 – удалить задачу N
-  todo clear                 – удалить все задачи (с запросом подтверждения)
+  todo clear                 – удалить все задачи (с запросом подтверждения)`)
+}
 
-Примеры:
-  todo add "Купить молоко"
-  todo list
-  todo done 2
-  todo del 1
-  todo clear`)
+func timeAgo(timestamp int64) string {
+	diff := time.Now().Unix() - timestamp
+	if diff < 60 {
+		return "только что"
+	}
+	if diff < 3600 {
+		return fmt.Sprintf("%d мин. назад", diff/60)
+	}
+	if diff < 86400 {
+		return fmt.Sprintf("%d ч. назад", diff/3600)
+	}
+	return fmt.Sprintf("%d дн. назад", diff/86400)
 }
 
 func cmdAdd(args []string) {
@@ -97,7 +106,7 @@ func cmdAdd(args []string) {
 		fmt.Println("Не удалось сохранить задачи:", err)
 		return
 	}
-	fmt.Println("Добавлена задача:", text)
+	color.Green("✓ Добавлена задача: %s", text)
 }
 
 func cmdList(_ []string) {
@@ -107,16 +116,31 @@ func cmdList(_ []string) {
 		return
 	}
 	if len(tasks) == 0 {
-		fmt.Println("Список задач пуст.")
+		fmt.Println("Список задач пуст. Добавьте первую задачу командой: todo add \"...\"")
 		return
 	}
-	fmt.Println("Ваш TODO‑лист:")
+
+	fmt.Println("📋TODO‑лист:")
 	for i, t := range tasks {
-		status := " "
+		idxColor := color.New(color.FgCyan, color.Bold)
+		statusIcon := "○"
+		statusColor := color.New(color.FgYellow)
+
 		if t.Done {
-			status = "✔"
+			statusIcon = "✔"
+			statusColor = color.New(color.FgGreen)
 		}
-		fmt.Printf("%2d. [%s] %s\n", i+1, status, t.Text)
+
+		timeStr := color.New(color.FgHiBlack).Sprintf("[%s]", timeAgo(t.Created))
+
+		statusColored := statusColor.Sprint(statusIcon)
+
+		fmt.Printf("%s. %s %s %s\n",
+			idxColor.Sprintf("%2d", i+1),
+			statusColored,
+			t.Text,
+			timeStr,
+		)
 	}
 }
 
@@ -159,7 +183,7 @@ func cmdDone(args []string) {
 		fmt.Println("Не удалось сохранить задачи:", err)
 		return
 	}
-	fmt.Printf("Задача %d отмечена как выполненная.\n", index+1)
+	color.Green("✔ Задача %d отмечена выполненной.", index+1)
 }
 
 func cmdDel(args []string) {
@@ -180,7 +204,38 @@ func cmdDel(args []string) {
 		fmt.Println("Не удалось сохранить задачи:", err)
 		return
 	}
-	fmt.Printf("Удалена задача %d: %s\n", index+1, removed.Text)
+	color.Red("✖ Удалена задача %d: %s", index+1, removed.Text)
+}
+
+func cmdEdit(args []string) {
+	if len(args) < 2 {
+		fmt.Println("Ошибка: укажите номер задачи и новый текст.")
+		fmt.Println("Пример: todo edit 1 \"Новый текст задачи\"")
+		return
+	}
+
+	taskNumArgs := []string{args[0]}
+
+	tasks, err := loadTasks()
+	if err != nil {
+		fmt.Println("Не удалось загрузить задачи:", err)
+		return
+	}
+
+	idx := parseTaskIndex(taskNumArgs, len(tasks))
+	if idx == -1 {
+		return
+	}
+
+	newText := strings.Join(args[1:], " ")
+	oldText := tasks[idx].Text
+	tasks[idx].Text = newText
+
+	if err := saveTasks(tasks); err != nil {
+		fmt.Println("Не удалось сохранить задачи:", err)
+		return
+	}
+	color.Cyan("✎ Задача %d изменена:\n  Было: %s\n  Стало: %s", idx+1, oldText, newText)
 }
 
 func cmdClear(_ []string) {
@@ -191,51 +246,68 @@ func cmdClear(_ []string) {
 		fmt.Println("Ошибка чтения ввода")
 		return
 	}
-	if strings.ToLower(reply) != "y" && strings.ToLower(reply) != "yes" {
+	reply = strings.TrimSpace(strings.ToLower(reply))
+	if reply != "y" && reply != "yes" {
 		fmt.Println("Отмена.")
 		return
 	}
-	if err := os.Remove(storagePathOrEmpty()); err != nil && !os.IsNotExist(err) {
+	path, err := storagePath()
+	if err != nil {
+		fmt.Println("Не удалось определить путь к файлу:", err)
+		return
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		fmt.Println("Не удалось удалить файл:", err)
 		return
 	}
-	fmt.Println("Все задачи удалены.")
-}
-
-func storagePathOrEmpty() string {
-	p, _ := storagePath()
-	return p
+	color.Red("🗑 Все задачи удалены.")
 }
 
 func nowUnix() int64 { return time.Now().Unix() }
 
 func main() {
-	flag.Parse()
-	args := flag.Args()
+	reader := bufio.NewReader(os.Stdin)
+	fmt.Println("TODO. Введите 'help' для списка команд или 'exit' для выхода.")
 
-	if len(args) == 0 {
-		printUsage()
-		return
-	}
+	for {
+		fmt.Print("\n> ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("Ошибка чтения:", err)
+			break
+		}
 
-	cmd, cmdArgs := strings.ToLower(args[0]), args[1:]
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
 
-	switch cmd {
-	case "add":
-		cmdAdd(cmdArgs)
-	case "list":
-		cmdList(cmdArgs)
-	case "done":
-		cmdDone(cmdArgs)
-	case "del", "delete", "remove":
-		cmdDel(cmdArgs)
-	case "clear":
-		cmdClear(cmdArgs)
-	case "help", "-h", "--help":
-		printUsage()
-	default:
-		fmt.Printf("Неизвестная команда: %s\n", cmd)
-		printUsage()
-		os.Exit(1)
+		parts := strings.Fields(input)
+		cmd := strings.ToLower(parts[0])
+		args := parts[1:]
+
+		if cmd == "exit" || cmd == "quit" {
+			fmt.Println("До свидания!")
+			break
+		}
+
+		switch cmd {
+		case "add":
+			cmdAdd(args)
+		case "list", "ls":
+			cmdList(args)
+		case "done", "check":
+			cmdDone(args)
+		case "edit", "update":
+			cmdEdit(args)
+		case "del", "delete", "remove", "rm":
+			cmdDel(args)
+		case "clear", "reset":
+			cmdClear(args)
+		case "help", "-h", "--help":
+			printUsage()
+		default:
+			color.Red("Неизвестная команда: %s. Введите 'help' для справки.\n", cmd)
+		}
 	}
 }
