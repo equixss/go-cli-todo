@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/equixss/go-cli-todo/internal/models"
 	"github.com/equixss/go-cli-todo/internal/storage"
@@ -14,29 +13,36 @@ import (
 )
 
 func printUsage() {
-	fmt.Println(`TODO – консольный список задач
-
-Usage:
-  todo add "текст задачи"    – добавить задачу
-  todo list                  – показать все задачи
-  todo done N                – отметить задачу N выполненной
-  todo edit N "текст"        – изменить текст задачи N
-  todo del N                 – удалить задачу N
-  todo clear                 – удалить все задачи (с запросом подтверждения)`)
+	fmt.Println(`Команды:
+  add <текст> [-p low|medium|high]  Добавить задачу
+  list [--done]                     Показать задачи
+  edit <N> <текст>                  Редактировать задачу
+  done <N>                          Отметить выполненной
+  del <N>                           Удалить задачу
+  clear                             Очистить все
+  exit                              Выход`)
 }
 
 func cmdAdd(args []string, store storage.Store) {
 	if len(args) == 0 {
-		color.Yellow("Ошибка: не указан текст задачи.")
+		color.Red("Ошибка: не указан текст задачи.")
 		return
 	}
 	text := strings.Join(args, " ")
+	priorityStr := models.PriorityLow.String()
+	for i, arg := range args {
+		if arg == "-p" && i+1 < len(args) {
+			priorityStr = args[i+1]
+			text = strings.Join(append(args[:i], args[i+2:]...), " ")
+			break
+		}
+	}
 	tasks, err := store.Load()
 	if err != nil {
 		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
-	newTask := models.Task{Text: text, Done: false, Created: time.Now().Unix(), Priority: models.PriorityMedium}
+	newTask := models.NewTask(text, models.MustParsePriority(priorityStr))
 	tasks = append(tasks, newTask)
 	if err := store.Save(tasks); err != nil {
 		color.Red("Не удалось сохранить задачи:", err)
@@ -45,19 +51,29 @@ func cmdAdd(args []string, store storage.Store) {
 	color.Green("✓ Добавлена задача: %s", text)
 }
 
-func cmdList(_ []string, store storage.Store) {
+func cmdList(args []string, store storage.Store) {
 	tasks, err := store.Load()
 	if err != nil {
 		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
-	if len(tasks) == 0 {
-		fmt.Println("Список задач пуст. Добавьте первую задачу командой: todo add \"...\"")
+	showDone := false
+	for _, arg := range args {
+		if arg == "--done" {
+			showDone = true
+		}
+	}
+
+	filtered := tasks.Filter(showDone)
+	filtered = filtered.SortByPriority()
+
+	if len(filtered) == 0 {
+		fmt.Println("Список задач пуст. Добавьте первую задачу командой: add \"...\"")
 		return
 	}
 
 	fmt.Println("📋TODO‑лист:")
-	for _, t := range tasks {
+	for _, t := range filtered {
 		statusIcon := "○"
 		statusColor := color.New(color.FgYellow)
 
@@ -66,40 +82,21 @@ func cmdList(_ []string, store storage.Store) {
 			statusColor = color.New(color.FgGreen, color.Faint)
 		}
 
+		priorityBadge := fmt.Sprintf("[%s] ", t.Priority.String())
+
 		idStr := color.New(color.FgCyan, color.Bold).Sprintf("%d", t.ID)
 		timeStr := color.New(color.FgHiBlack).Sprintf("[%s]", t.TimeAgo())
 
 		statusColored := statusColor.Sprint(statusIcon)
 
-		fmt.Printf("%s. %s %s %s\n",
+		fmt.Printf("%s. %s%s %s %s\n",
 			idStr,
+			priorityBadge,
 			statusColored,
 			t.Text,
 			timeStr,
 		)
 	}
-}
-
-func parseIndex(args []string, store storage.Store) (int, error) {
-	if len(args) != 1 {
-		return -1, fmt.Errorf("укажите номер задачи")
-	}
-	n, err := strconv.Atoi(args[0])
-	if err != nil || n <= 0 {
-		return -1, fmt.Errorf("номер должен быть положительным числом")
-	}
-
-	tasks, err := store.Load()
-	if err != nil {
-		return -1, err
-	}
-
-	for i, t := range tasks {
-		if t.ID == n {
-			return i, nil
-		}
-	}
-	return -1, fmt.Errorf("задача #%d не найдена", n)
 }
 
 func cmdDone(args []string, store storage.Store) {
@@ -192,14 +189,34 @@ func cmdClear(store storage.Store) {
 		fmt.Println("Отмена.")
 		return
 	}
-	if err := os.Remove(store.GetPath()); err != nil && !os.IsNotExist(err) {
+	if err := store.Clear(); err != nil && !os.IsNotExist(err) {
 		color.Red("Не удалось удалить файл:", err)
 		return
 	}
 	color.Red("🗑 Все задачи удалены.")
 }
 
-/*func nowUnix() int64 { return time.Now().Unix() }*/
+func parseIndex(args []string, store storage.Store) (int, error) {
+	if len(args) != 1 {
+		return -1, fmt.Errorf("укажите номер задачи")
+	}
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n <= 0 {
+		return -1, fmt.Errorf("номер должен быть положительным числом")
+	}
+
+	tasks, err := store.Load()
+	if err != nil {
+		return -1, err
+	}
+
+	for i, t := range tasks {
+		if t.ID == n {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("задача #%d не найдена", n)
+}
 
 func handleCommand(args []string, store storage.Store) {
 	if len(args) == 0 {

@@ -11,9 +11,10 @@ import (
 )
 
 type Store interface {
-	Load() ([]models.Task, error)
-	Save([]models.Task) error
+	Load() (models.TaskSlice, error)
+	Save(models.TaskSlice) error
 	GetPath() string
+	Clear() error
 }
 
 type JSONStore struct {
@@ -33,7 +34,7 @@ func (s *JSONStore) GetPath() string {
 	return s.path
 }
 
-func (s *JSONStore) Load() ([]models.Task, error) {
+func (s *JSONStore) Load() (models.TaskSlice, error) {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -42,7 +43,7 @@ func (s *JSONStore) Load() ([]models.Task, error) {
 		return nil, err
 	}
 
-	var tasks []models.Task
+	var tasks models.TaskSlice
 	if err := json.Unmarshal(data, &tasks); err != nil {
 		return nil, err
 	}
@@ -51,7 +52,7 @@ func (s *JSONStore) Load() ([]models.Task, error) {
 	return tasks, nil
 }
 
-func (s *JSONStore) Save(tasks []models.Task) error {
+func (s *JSONStore) Save(tasks models.TaskSlice) error {
 	s.reindexTasks(&tasks)
 
 	data, err := json.MarshalIndent(tasks, "", "  ")
@@ -66,12 +67,15 @@ func (s *JSONStore) Save(tasks []models.Task) error {
 	return os.Rename(tmp, s.path)
 }
 
-// Пересчитывает ID, чтобы они всегда шли по порядку 1..N
-func (s *JSONStore) reindexTasks(tasks *[]models.Task) {
+func (s *JSONStore) reindexTasks(tasks *models.TaskSlice) {
 	for i := range *tasks {
 		(*tasks)[i].ID = i + 1
 	}
 	sort.Slice(*tasks, func(i, j int) bool {
-		return (*tasks)[i].Created < (*tasks)[j].Created
+		return (*tasks)[i].CreatedAt < (*tasks)[j].CreatedAt
 	})
+}
+
+func (s *JSONStore) Clear() error {
+	return os.Remove(s.path)
 }
