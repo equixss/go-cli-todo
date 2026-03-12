@@ -28,21 +28,32 @@ func cmdAdd(args []string, store storage.Store) {
 		color.Red("Ошибка: не указан текст задачи.")
 		return
 	}
-	text := strings.Join(args, " ")
+	var textParts []string
 	priorityStr := models.PriorityLow.String()
-	for i, arg := range args {
-		if arg == "-p" && i+1 < len(args) {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-p" && i+1 < len(args) {
 			priorityStr = args[i+1]
-			text = strings.Join(append(args[:i], args[i+2:]...), " ")
-			break
+			i++
+		} else {
+			textParts = append(textParts, args[i])
 		}
 	}
+	if len(textParts) == 0 {
+		color.Red("Ошибка: не указан текст задачи.")
+		return
+	}
+	text := strings.Join(textParts, " ")
 	tasks, err := store.Load()
 	if err != nil {
 		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
-	newTask := models.NewTask(text, models.MustParsePriority(priorityStr))
+	priority, err := models.ParsePriority(priorityStr)
+	if err != nil {
+		color.Red("Ошибка: недопустимый приоритет '%s'. Допустимые значения: low, medium, high.", priorityStr)
+		return
+	}
+	newTask := models.NewTask(text, priority)
 	tasks = append(tasks, newTask)
 	if err := store.Save(tasks); err != nil {
 		color.Red("Не удалось сохранить задачи:", err)
@@ -57,22 +68,81 @@ func cmdList(args []string, store storage.Store) {
 		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
+
 	showDone := false
-	for _, arg := range args {
-		if arg == "--done" {
+	priorityFilter := ""
+	limit := -1
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--done":
 			showDone = true
+		case "--priority":
+			if i+1 < len(args) {
+				priorityFilter = args[i+1]
+				i++
+			} else {
+				color.Red("Ошибка: укажите значение приоритета после --priority")
+				return
+			}
+		case "--limit":
+			if i+1 < len(args) {
+				n, err := strconv.Atoi(args[i+1])
+				if err != nil || n <= 0 {
+					color.Red("Ошибка: --limit должен быть положительным числом")
+					return
+				}
+				limit = n
+				i++
+			} else {
+				color.Red("Ошибка: укажите число после --limit")
+				return
+			}
 		}
 	}
 
 	filtered := tasks.Filter(showDone)
 	filtered = filtered.SortByPriority()
 
+	if priorityFilter != "" {
+		priority, err := models.ParsePriority(priorityFilter)
+		if err != nil {
+			color.Red("Ошибка: недопустимый приоритет '%s'. Допустимые: low, medium, high.", priorityFilter)
+			return
+		}
+		var prioritized []models.Task
+		for _, t := range filtered {
+			if t.Priority == priority {
+				prioritized = append(prioritized, t)
+			}
+		}
+		filtered = prioritized
+	}
+
+	if limit > 0 && len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
 	if len(filtered) == 0 {
 		fmt.Println("Список задач пуст. Добавьте первую задачу командой: add \"...\"")
 		return
 	}
 
-	fmt.Println("📋TODO‑лист:")
+	header := "📋 TODO‑лист"
+	if showDone || priorityFilter != "" || limit > 0 {
+		var filters []string
+		if showDone {
+			filters = append(filters, "выполненные")
+		}
+		if priorityFilter != "" {
+			filters = append(filters, fmt.Sprintf("приоритет: %s", priorityFilter))
+		}
+		if limit > 0 {
+			filters = append(filters, fmt.Sprintf("лимит: %d", limit))
+		}
+		header = fmt.Sprintf("📋 TODO‑лист (%s)", strings.Join(filters, ", "))
+	}
+	color.Cyan(header + ":")
 	for _, t := range filtered {
 		statusIcon := "○"
 		statusColor := color.New(color.FgYellow)
@@ -126,6 +196,16 @@ func cmdDone(args []string, store storage.Store) {
 }
 
 func cmdDel(args []string, store storage.Store) {
+	force := false
+	var taskArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-f" {
+			force = true
+		} else {
+			taskArgs = append(taskArgs, args[i])
+		}
+	}
+
 	index, err := parseIndex(args, store)
 	if err != nil {
 		color.Red("%v", err)
@@ -138,6 +218,20 @@ func cmdDel(args []string, store storage.Store) {
 	}
 
 	removed := tasks[index]
+	if !force {
+		fmt.Printf("Вы уверены, что хотите удалить задачу #%d: \"%s\"? (y/N): ", index+1, removed.Text)
+		reader := bufio.NewReader(os.Stdin)
+		reply, err := reader.ReadString('\n')
+		if err != nil {
+			color.Red("Ошибка чтения ввода")
+			return
+		}
+		reply = strings.TrimSpace(strings.ToLower(reply))
+		if reply != "y" && reply != "yes" {
+			fmt.Println("Отмена.")
+			return
+		}
+	}
 	tasks = append(tasks[:index], tasks[index+1:]...)
 	if err := store.Save(tasks); err != nil {
 		color.Red("Не удалось сохранить задачи:", err)
@@ -149,7 +243,7 @@ func cmdDel(args []string, store storage.Store) {
 func cmdEdit(args []string, store storage.Store) {
 	if len(args) < 2 {
 		color.Red("Ошибка: укажите номер задачи и новый текст.")
-		fmt.Println("Пример: todo edit 1 \"Новый текст задачи\"")
+		fmt.Println("Пример: edit 1 \"Новый текст задачи\"")
 		return
 	}
 
@@ -170,7 +264,7 @@ func cmdEdit(args []string, store storage.Store) {
 	tasks[index].Text = newText
 
 	if err := store.Save(tasks); err != nil {
-		fmt.Println("Не удалось сохранить задачи:", err)
+		color.Red("Не удалось сохранить задачи:", err)
 		return
 	}
 	color.Cyan("✎ Задача %d изменена:\n  Было: %s\n  Стало: %s", index+1, oldText, newText)
