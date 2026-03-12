@@ -2,67 +2,16 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/user"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/equixss/go-cli-todo/internal/models"
+	"github.com/equixss/go-cli-todo/internal/storage"
 	"github.com/fatih/color"
 )
-
-type Task struct {
-	Text    string `json:"text"`
-	Done    bool   `json:"done"`
-	Created int64  `json:"created"`
-}
-
-func storagePath() (string, error) {
-	usr, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(usr.HomeDir, ".todo.json"), nil
-}
-
-func loadTasks() ([]Task, error) {
-	path, err := storagePath()
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []Task{}, nil
-		}
-		return nil, err
-	}
-	var tasks []Task
-	if err := json.Unmarshal(data, &tasks); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
-
-func saveTasks(tasks []Task) error {
-	path, err := storagePath()
-	if err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(tasks, "", "  ")
-	if err != nil {
-		return err
-	}
-	// Запишем атомарно (чтобы не испортить файл в случае сбоя)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
 
 func printUsage() {
 	fmt.Println(`TODO – консольный список задач
@@ -76,43 +25,30 @@ Usage:
   todo clear                 – удалить все задачи (с запросом подтверждения)`)
 }
 
-func timeAgo(timestamp int64) string {
-	diff := time.Now().Unix() - timestamp
-	if diff < 60 {
-		return "только что"
-	}
-	if diff < 3600 {
-		return fmt.Sprintf("%d мин. назад", diff/60)
-	}
-	if diff < 86400 {
-		return fmt.Sprintf("%d ч. назад", diff/3600)
-	}
-	return fmt.Sprintf("%d дн. назад", diff/86400)
-}
-
-func cmdAdd(args []string) {
+func cmdAdd(args []string, store storage.Store) {
 	if len(args) == 0 {
-		fmt.Println("Ошибка: не указан текст задачи.")
+		color.Yellow("Ошибка: не указан текст задачи.")
 		return
 	}
 	text := strings.Join(args, " ")
-	tasks, err := loadTasks()
+	tasks, err := store.Load()
 	if err != nil {
-		fmt.Println("Не удалось загрузить задачи:", err)
+		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
-	tasks = append(tasks, Task{Text: text, Done: false, Created: nowUnix()})
-	if err := saveTasks(tasks); err != nil {
-		fmt.Println("Не удалось сохранить задачи:", err)
+	newTask := models.Task{Text: text, Done: false, Created: time.Now().Unix(), Priority: models.PriorityMedium}
+	tasks = append(tasks, newTask)
+	if err := store.Save(tasks); err != nil {
+		color.Red("Не удалось сохранить задачи:", err)
 		return
 	}
 	color.Green("✓ Добавлена задача: %s", text)
 }
 
-func cmdList(_ []string) {
-	tasks, err := loadTasks()
+func cmdList(_ []string, store storage.Store) {
+	tasks, err := store.Load()
 	if err != nil {
-		fmt.Println("Не удалось загрузить задачи:", err)
+		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
 	if len(tasks) == 0 {
@@ -121,22 +57,22 @@ func cmdList(_ []string) {
 	}
 
 	fmt.Println("📋TODO‑лист:")
-	for i, t := range tasks {
-		idxColor := color.New(color.FgCyan, color.Bold)
+	for _, t := range tasks {
 		statusIcon := "○"
 		statusColor := color.New(color.FgYellow)
 
 		if t.Done {
 			statusIcon = "✔"
-			statusColor = color.New(color.FgGreen)
+			statusColor = color.New(color.FgGreen, color.Faint)
 		}
 
-		timeStr := color.New(color.FgHiBlack).Sprintf("[%s]", timeAgo(t.Created))
+		idStr := color.New(color.FgCyan, color.Bold).Sprintf("%d", t.ID)
+		timeStr := color.New(color.FgHiBlack).Sprintf("[%s]", t.TimeAgo())
 
 		statusColored := statusColor.Sprint(statusIcon)
 
 		fmt.Printf("%s. %s %s %s\n",
-			idxColor.Sprintf("%2d", i+1),
+			idStr,
 			statusColored,
 			t.Text,
 			timeStr,
@@ -144,32 +80,38 @@ func cmdList(_ []string) {
 	}
 }
 
-func parseTaskIndex(args []string, tasksCount int) int {
+func parseIndex(args []string, store storage.Store) (int, error) {
 	if len(args) != 1 {
-		fmt.Println("Ошибка: укажите номер задачи.")
-		return -1
+		return -1, fmt.Errorf("укажите номер задачи")
 	}
 	n, err := strconv.Atoi(args[0])
 	if err != nil || n <= 0 {
-		fmt.Println("Ошибка: номер задачи должен быть положительным целым числом.")
-		return -1
+		return -1, fmt.Errorf("номер должен быть положительным числом")
 	}
-	if n > tasksCount {
-		fmt.Printf("Ошибка: в списке %d задач(и).\n", tasksCount)
-		return -1
+
+	tasks, err := store.Load()
+	if err != nil {
+		return -1, err
 	}
-	return n - 1
+
+	for i, t := range tasks {
+		if t.ID == n {
+			return i, nil
+		}
+	}
+	return -1, fmt.Errorf("задача #%d не найдена", n)
 }
 
-func cmdDone(args []string) {
-	tasks, err := loadTasks()
+func cmdDone(args []string, store storage.Store) {
+	index, err := parseIndex(args, store)
 	if err != nil {
-		fmt.Println("Не удалось загрузить задачи:", err)
+		color.Red("%v", err)
 		return
 	}
 
-	index := parseTaskIndex(args, len(tasks))
-	if index == -1 {
+	tasks, err := store.Load()
+	if err != nil {
+		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
 
@@ -179,71 +121,70 @@ func cmdDone(args []string) {
 	}
 
 	tasks[index].Done = true
-	if err := saveTasks(tasks); err != nil {
-		fmt.Println("Не удалось сохранить задачи:", err)
+	if err := store.Save(tasks); err != nil {
+		color.Red("Не удалось сохранить задачи:", err)
 		return
 	}
 	color.Green("✔ Задача %d отмечена выполненной.", index+1)
 }
 
-func cmdDel(args []string) {
-	tasks, err := loadTasks()
+func cmdDel(args []string, store storage.Store) {
+	index, err := parseIndex(args, store)
 	if err != nil {
-		fmt.Println("Не удалось загрузить задачи:", err)
+		color.Red("%v", err)
 		return
 	}
-
-	index := parseTaskIndex(args, len(tasks))
-	if index == -1 {
+	tasks, err := store.Load()
+	if err != nil {
+		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
 
 	removed := tasks[index]
 	tasks = append(tasks[:index], tasks[index+1:]...)
-	if err := saveTasks(tasks); err != nil {
-		fmt.Println("Не удалось сохранить задачи:", err)
+	if err := store.Save(tasks); err != nil {
+		color.Red("Не удалось сохранить задачи:", err)
 		return
 	}
-	color.Red("✖ Удалена задача %d: %s", index+1, removed.Text)
+	color.Red("✖ Удалена задача %d: %s", removed.ID, removed.Text)
 }
 
-func cmdEdit(args []string) {
+func cmdEdit(args []string, store storage.Store) {
 	if len(args) < 2 {
-		fmt.Println("Ошибка: укажите номер задачи и новый текст.")
+		color.Red("Ошибка: укажите номер задачи и новый текст.")
 		fmt.Println("Пример: todo edit 1 \"Новый текст задачи\"")
 		return
 	}
 
-	taskNumArgs := []string{args[0]}
-
-	tasks, err := loadTasks()
+	index, err := parseIndex([]string{args[0]}, store)
 	if err != nil {
-		fmt.Println("Не удалось загрузить задачи:", err)
+		color.Red("%v", err)
 		return
 	}
 
-	idx := parseTaskIndex(taskNumArgs, len(tasks))
-	if idx == -1 {
+	tasks, err := store.Load()
+	if err != nil {
+		color.Red("Не удалось загрузить задачи:", err)
 		return
 	}
 
 	newText := strings.Join(args[1:], " ")
-	oldText := tasks[idx].Text
-	tasks[idx].Text = newText
+	oldText := tasks[index].Text
+	tasks[index].Text = newText
 
-	if err := saveTasks(tasks); err != nil {
+	if err := store.Save(tasks); err != nil {
 		fmt.Println("Не удалось сохранить задачи:", err)
 		return
 	}
-	color.Cyan("✎ Задача %d изменена:\n  Было: %s\n  Стало: %s", idx+1, oldText, newText)
+	color.Cyan("✎ Задача %d изменена:\n  Было: %s\n  Стало: %s", index+1, oldText, newText)
 }
 
-func cmdClear(_ []string) {
+func cmdClear(store storage.Store) {
 	fmt.Print("Вы уверены, что хотите удалить **все** задачи? (y/N): ")
 	reader := bufio.NewReader(os.Stdin)
 	reply, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Println("Ошибка чтения ввода")
+		color.Red("Ошибка чтения ввода")
 		return
 	}
 	reply = strings.TrimSpace(strings.ToLower(reply))
@@ -251,21 +192,51 @@ func cmdClear(_ []string) {
 		fmt.Println("Отмена.")
 		return
 	}
-	path, err := storagePath()
-	if err != nil {
-		fmt.Println("Не удалось определить путь к файлу:", err)
-		return
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		fmt.Println("Не удалось удалить файл:", err)
+	if err := os.Remove(store.GetPath()); err != nil && !os.IsNotExist(err) {
+		color.Red("Не удалось удалить файл:", err)
 		return
 	}
 	color.Red("🗑 Все задачи удалены.")
 }
 
-func nowUnix() int64 { return time.Now().Unix() }
+/*func nowUnix() int64 { return time.Now().Unix() }*/
+
+func handleCommand(args []string, store storage.Store) {
+	if len(args) == 0 {
+		printUsage()
+		return
+	}
+
+	cmd := args[0]
+	taskArgs := args[1:]
+
+	switch cmd {
+	case "add":
+		cmdAdd(taskArgs, store)
+	case "list", "ls":
+		cmdList(taskArgs, store)
+	case "done", "check":
+		cmdDone(taskArgs, store)
+	case "edit", "update":
+		cmdEdit(taskArgs, store)
+	case "del", "delete", "remove", "rm":
+		cmdDel(taskArgs, store)
+	case "clear", "reset":
+		cmdClear(store)
+	case "help", "-h", "--help":
+		printUsage()
+	default:
+		color.Red("Неизвестная команда: %s", cmd)
+		printUsage()
+	}
+}
 
 func main() {
+	store, err := storage.NewJSONStore()
+	if err != nil {
+		color.Red("Ошибка инициализации хранилища: %v", err)
+		os.Exit(1)
+	}
 	reader := bufio.NewReader(os.Stdin)
 	fmt.Println("TODO. Введите 'help' для списка команд или 'exit' для выхода.")
 
@@ -291,23 +262,6 @@ func main() {
 			break
 		}
 
-		switch cmd {
-		case "add":
-			cmdAdd(args)
-		case "list", "ls":
-			cmdList(args)
-		case "done", "check":
-			cmdDone(args)
-		case "edit", "update":
-			cmdEdit(args)
-		case "del", "delete", "remove", "rm":
-			cmdDel(args)
-		case "clear", "reset":
-			cmdClear(args)
-		case "help", "-h", "--help":
-			printUsage()
-		default:
-			color.Red("Неизвестная команда: %s. Введите 'help' для справки.\n", cmd)
-		}
+		handleCommand(append([]string{cmd}, args...), store)
 	}
 }
